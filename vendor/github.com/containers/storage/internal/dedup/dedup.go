@@ -2,6 +2,7 @@ package dedup
 
 import (
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -20,9 +21,42 @@ const (
 	DedupHashCRC
 	DedupHashFileSize
 	DedupHashSHA256
+	DedupHashSHA512
 )
 
 type DedupHashMethod int
+
+// String returns the string representation of the hash method
+func (h DedupHashMethod) String() string {
+	switch h {
+	case DedupHashCRC:
+		return "crc64"
+	case DedupHashFileSize:
+		return "size"
+	case DedupHashSHA256:
+		return "sha256"
+	case DedupHashSHA512:
+		return "sha512"
+	default:
+		return "invalid"
+	}
+}
+
+// ParseHashMethod parses a string into a DedupHashMethod
+func ParseHashMethod(s string) (DedupHashMethod, error) {
+	switch s {
+	case "crc64":
+		return DedupHashCRC, nil
+	case "size":
+		return DedupHashFileSize, nil
+	case "sha256":
+		return DedupHashSHA256, nil
+	case "sha512":
+		return DedupHashSHA512, nil
+	default:
+		return DedupHashInvalid, fmt.Errorf("unknown hash method: %s", s)
+	}
+}
 
 type DedupOptions struct {
 	// HashMethod is the hash function to use to find identical files
@@ -45,6 +79,14 @@ func getFileChecksum(hashMethod DedupHashMethod, path string, info fs.FileInfo) 
 	case DedupHashSHA256:
 		return readAllFile(path, info, func(buf []byte) (string, error) {
 			h := sha256.New()
+			if _, err := h.Write(buf); err != nil {
+				return "", err
+			}
+			return string(h.Sum(nil)), nil
+		})
+	case DedupHashSHA512:
+		return readAllFile(path, info, func(buf []byte) (string, error) {
+			h := sha512.New()
 			if _, err := h.Write(buf); err != nil {
 				return "", err
 			}

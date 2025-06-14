@@ -256,9 +256,9 @@ func TestAddArtifact(t *testing.T) {
 			list := Create()
 			var instanceDigest digest.Digest
 			if file != "" {
-				instanceDigest, err = list.AddArtifact(ctx, sys, options, file)
+				instanceDigest, err = list.AddArtifact(store, ctx, sys, options, file)
 			} else {
-				instanceDigest, err = list.AddArtifact(ctx, sys, options)
+				instanceDigest, err = list.AddArtifact(store, ctx, sys, options)
 			}
 			assert.NoErrorf(t, err, "list.AddArtifact(%#v)", options)
 			assert.Equal(t, 1, len(list.Instances()), "too many instances added")
@@ -299,7 +299,7 @@ func TestAddArtifact(t *testing.T) {
 				st, err := f.Stat()
 				require.NoError(t, err)
 				configFileSize = st.Size()
-				digester := digest.Canonical.Digester()
+				digester := digest.NewDigestFromEncoded(digest.Algorithm(store.GetDigestType()), "").Algorithm().Digester()
 				_, err = io.Copy(digester.Hash(), f)
 				require.NoError(t, err)
 				configFileDigest = digester.Digest()
@@ -408,8 +408,8 @@ func TestAddArtifact(t *testing.T) {
 		}
 		for _, configDescriptor := range []*v1.Descriptor{
 			nil,
-			{MediaType: "application/x-config", Size: 0, Digest: digest.Canonical.FromString("")},
-			{MediaType: v1.MediaTypeImageConfig, Size: 0, Digest: digest.Canonical.FromString("")},
+			{MediaType: "application/x-config", Size: 0, Digest: digest.NewDigestFromEncoded(digest.Algorithm(store.GetDigestType()), "")},
+			{MediaType: v1.MediaTypeImageConfig, Size: 0, Digest: digest.NewDigestFromEncoded(digest.Algorithm(store.GetDigestType()), "")},
 			&v1.DescriptorEmptyJSON,
 		} {
 			for _, configFile := range []string{
@@ -519,17 +519,17 @@ func TestReference(t *testing.T) {
 	artifactOptions := AddArtifactOptions{
 		ConfigFile: emptyJSON,
 	}
-	_, err = list.AddArtifact(ctx, &types.SystemContext{}, artifactOptions)
+	_, err = list.AddArtifact(store, ctx, &types.SystemContext{}, artifactOptions)
 	assert.NoErrorf(t, err, "list.AddArtifact(file=%s)", emptyJSON)
 
 	artifactOptions = AddArtifactOptions{
 		ConfigDescriptor: &v1.DescriptorEmptyJSON,
 	}
-	minimumArtifactDigest, err := list.AddArtifact(ctx, &types.SystemContext{}, artifactOptions, minimumJSON)
+	minimumArtifactDigest, err := list.AddArtifact(store, ctx, &types.SystemContext{}, artifactOptions, minimumJSON)
 	assert.NoError(t, err, "list.AddArtifact(file=%s)", minimumJSON)
 
 	artifactOptions = AddArtifactOptions{}
-	smallArtifactDigest, err := list.AddArtifact(ctx, &types.SystemContext{}, artifactOptions, smallJSON)
+	smallArtifactDigest, err := list.AddArtifact(store, ctx, &types.SystemContext{}, artifactOptions, smallJSON)
 	assert.NoError(t, err, "list.AddArtifact(file=%s)", smallJSON)
 
 	listRef, err := list.Reference(store, cp.CopyAllImages, nil)
@@ -785,9 +785,9 @@ func TestInstanceByImageAndFiles(t *testing.T) {
 
 	list := Create()
 	options := AddArtifactOptions{}
-	firstInstanceDigest, err := list.AddArtifact(ctx, sys, options, cconfig, gzipped)
+	firstInstanceDigest, err := list.AddArtifact(store, ctx, sys, options, cconfig, gzipped)
 	assert.NoError(t, err)
-	secondInstanceDigest, err := list.AddArtifact(ctx, sys, options, pngfile)
+	secondInstanceDigest, err := list.AddArtifact(store, ctx, sys, options, pngfile)
 	assert.NoError(t, err)
 
 	candidate, err := list.InstanceByFile(cconfig)

@@ -160,19 +160,17 @@ func loadStoreOptionsFromConfFile(storageConf string) (StoreOptions, error) {
 		defaultRootlessGraphRoot = storageOpts.GraphRoot
 		storageOpts = StoreOptions{}
 		reloadConfigurationFileIfNeeded(storageConf, &storageOpts)
-		if usePerUserStorage() {
-			// If the file did not specify a graphroot or runroot,
-			// set sane defaults so we don't try and use root-owned
-			// directories
-			if storageOpts.RunRoot == "" {
-				storageOpts.RunRoot = defaultRootlessRunRoot
-			}
-			if storageOpts.GraphRoot == "" {
-				if storageOpts.RootlessStoragePath != "" {
-					storageOpts.GraphRoot = storageOpts.RootlessStoragePath
-				} else {
-					storageOpts.GraphRoot = defaultRootlessGraphRoot
-				}
+		// If the file did not specify a graphroot or runroot,
+		// set sane defaults so we don't try and use root-owned
+		// directories
+		if storageOpts.RunRoot == "" {
+			storageOpts.RunRoot = defaultRootlessRunRoot
+		}
+		if storageOpts.GraphRoot == "" {
+			if storageOpts.RootlessStoragePath != "" {
+				storageOpts.GraphRoot = storageOpts.RootlessStoragePath
+			} else {
+				storageOpts.GraphRoot = defaultRootlessGraphRoot
 			}
 		}
 	}
@@ -271,6 +269,10 @@ type StoreOptions struct {
 	DisableVolatile bool `json:"disable-volatile,omitempty"`
 	// If transient, don't persist containers over boot (stores db in runroot)
 	TransientStore bool `json:"transient_store,omitempty"`
+	// DigestType specifies the hash algorithm to use for content addressing.
+	// Supported values are: "sha256", "sha512", "crc64", "size"
+	// Default is "sha256"
+	DigestType string `json:"digest_type,omitempty"`
 }
 
 // isRootlessDriver returns true if the given storage driver is valid for containers running as non root

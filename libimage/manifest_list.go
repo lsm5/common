@@ -627,7 +627,7 @@ func (m *ManifestList) AddArtifact(ctx context.Context, options *ManifestListAdd
 	if err := m.reload(); err != nil {
 		return "", err
 	}
-	newDigest, err := m.list.AddArtifact(ctx, systemContext, opts, files...)
+	newDigest, err := m.list.AddArtifact(m.image.runtime.store, ctx, systemContext, opts, files...)
 	if err != nil {
 		return "", err
 	}

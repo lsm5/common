@@ -201,6 +201,7 @@ type Store interface {
 	PullOptions() map[string]string
 	UIDMap() []idtools.IDMap
 	GIDMap() []idtools.IDMap
+	GetDigestType() string
 
 	// GraphDriver obtains and returns a handle to the graph Driver object used
 	// by the Store.
@@ -362,15 +363,11 @@ type Store interface {
 	//   }
 	ApplyDiff(to string, diff io.Reader) (int64, error)
 
-	// ApplyDiffWithDiffer applies a diff to a layer.
-	// It is the caller responsibility to clean the staging directory if it is not
-	// successfully applied with ApplyStagedLayer.
-	// Deprecated: Use PrepareStagedLayer instead.  ApplyDiffWithDiffer is going to be removed in a future release
-	ApplyDiffWithDiffer(to string, options *drivers.ApplyDiffWithDifferOpts, differ drivers.Differ) (*drivers.DriverWithDifferOutput, error)
-
 	// PrepareStagedLayer applies a diff to a layer.
 	// It is the caller responsibility to clean the staging directory if it is not
 	// successfully applied with ApplyStagedLayer.
+	// The caller must ensure [Store.ApplyStagedLayer] or [Store.CleanupStagedLayer] is called eventually
+	// with the returned [drivers.DriverWithDifferOutput] object.
 	PrepareStagedLayer(options *drivers.ApplyDiffWithDifferOpts, differ drivers.Differ) (*drivers.DriverWithDifferOutput, error)
 
 	// ApplyStagedLayer combines the functions of creating a layer and using the staging
@@ -468,7 +465,7 @@ type Store interface {
 	ImageRunDirectory(id string) (string, error)
 
 	// ListLayerBigData retrieves a list of the (possibly large) chunks of
-	// named data associated with a layer.
+	// named data associated with an layer.
 	ListLayerBigData(id string) ([]string, error)
 
 	// LayerBigData retrieves a (possibly large) chunk of named data
@@ -660,7 +657,7 @@ type LayerOptions struct {
 	// not the tarstream.
 	// Use nil if not applicable or not known.
 	OriginalSize *int64
-	// UncompressedDigest specifies a digest of the uncompressed version (“DiffID”)
+	// UncompressedDigest specifies a digest of the uncompressed version ("DiffID")
 	// of the tarstream (diff), if one is provided along with these LayerOptions,
 	// and reliably known by the caller.
 	// Use the default "" if this fields is not applicable or the value is not known.
@@ -755,7 +752,7 @@ type store struct {
 	//   because (??) the Shutdown may forcibly unmount and clean up, affecting graph driver state in a way only a graph driver
 	//   and layer store reinitialization can notice.
 	// - Ensures that store.Shutdown is exclusive with mount operations. This is necessary at because some
-	//   graph drivers call mount.MakePrivate() during initialization, the mount operations require that, and the driver’s Cleanup() method
+	//   graph drivers call mount.MakePrivate() during initialization, the mount operations require that, and the driver's Cleanup() method
 	//   may undo that. So, holding graphLock is required throughout the duration of Shutdown(), and the duration of any mount
 	//   (but not unmount) calls.
 	// - Within this store object, protects access to some related in-memory state.
@@ -777,6 +774,7 @@ type store struct {
 	digestLockRoot  string
 	disableVolatile bool
 	transientStore  bool
+	digestType      string
 
 	// The following fields can only be accessed with graphLock held.
 	graphLockLastWrite lockfile.LastWrite
@@ -786,7 +784,7 @@ type store struct {
 	layerStoreUseGetters    rwLayerStore   // Almost all users should use the provided accessors instead of accessing this field directly.
 	roLayerStoresUseGetters []roLayerStore // Almost all users should use the provided accessors instead of accessing this field directly.
 
-	// FIXME: The following fields need locking, and don’t have it.
+	// FIXME: The following fields need locking, and don't have it.
 	additionalUIDs *idSet // Set by getAvailableIDs()
 	additionalGIDs *idSet // Set by getAvailableIDs()
 }
@@ -908,6 +906,7 @@ func GetStore(options types.StoreOptions) (Store, error) {
 		autoNsMaxSize:       autoNsMaxSize,
 		disableVolatile:     options.DisableVolatile,
 		transientStore:      options.TransientStore,
+		digestType:          options.DigestType,
 
 		additionalUIDs: nil,
 		additionalGIDs: nil,
@@ -1079,7 +1078,7 @@ func (s *store) startUsingGraphDriver() error {
 		}
 		// Our concurrency design requires s.graphDriverName not to be modified after
 		// store is constructed.
-		// It’s fine for driver.String() not to match the requested graph driver name
+		// It's fine for driver.String() not to match the requested graph driver name
 		// (e.g. if the user asks for overlay2 and gets overlay), but it must be an idempotent
 		// mapping:
 		//	driver1 := drivers.New(userInput, config)
@@ -1449,16 +1448,7 @@ func (s *store) writeToAllStores(fn func(rlstore rwLayerStore) error) error {
 // On entry:
 // - rlstore must be locked for writing
 func (s *store) canUseShifting(uidmap, gidmap []idtools.IDMap) bool {
-	if !s.graphDriver.SupportsShifting() {
-		return false
-	}
-	if uidmap != nil && !idtools.IsContiguous(uidmap) {
-		return false
-	}
-	if gidmap != nil && !idtools.IsContiguous(gidmap) {
-		return false
-	}
-	return true
+	return s.graphDriver.SupportsShifting(uidmap, gidmap)
 }
 
 // On entry:
@@ -1521,7 +1511,7 @@ func (s *store) putLayer(rlstore rwLayerStore, rlstores []roLayerStore, id, pare
 			gidMap = ilayer.GIDMap
 		}
 	} else {
-		// FIXME? It’s unclear why we are holding containerStore locked here at all
+		// FIXME? It's unclear why we are holding containerStore locked here at all
 		// (and because we are not modifying it, why it is a write lock, not a read lock).
 		if err := s.containerStore.startWriting(); err != nil {
 			return nil, -1, err
@@ -3132,6 +3122,12 @@ func (s *store) Diff(from, to string, options *DiffOptions) (io.ReadCloser, erro
 }
 
 func (s *store) ApplyStagedLayer(args ApplyStagedLayerOptions) (*Layer, error) {
+	defer func() {
+		if args.DiffOutput.TarSplit != nil {
+			args.DiffOutput.TarSplit.Close()
+			args.DiffOutput.TarSplit = nil
+		}
+	}()
 	rlstore, rlstores, err := s.bothLayerStoreKinds()
 	if err != nil {
 		return nil, err
@@ -3163,6 +3159,10 @@ func (s *store) ApplyStagedLayer(args ApplyStagedLayerOptions) (*Layer, error) {
 }
 
 func (s *store) CleanupStagedLayer(diffOutput *drivers.DriverWithDifferOutput) error {
+	if diffOutput.TarSplit != nil {
+		diffOutput.TarSplit.Close()
+		diffOutput.TarSplit = nil
+	}
 	_, err := writeToLayerStore(s, func(rlstore rwLayerStore) (struct{}, error) {
 		return struct{}{}, rlstore.CleanupStagingDirectory(diffOutput.Target)
 	})
@@ -3175,13 +3175,6 @@ func (s *store) PrepareStagedLayer(options *drivers.ApplyDiffWithDifferOpts, dif
 		return nil, err
 	}
 	return rlstore.applyDiffWithDifferNoLock(options, differ)
-}
-
-func (s *store) ApplyDiffWithDiffer(to string, options *drivers.ApplyDiffWithDifferOpts, differ drivers.Differ) (*drivers.DriverWithDifferOutput, error) {
-	if to != "" {
-		return nil, fmt.Errorf("ApplyDiffWithDiffer does not support non-empty 'layer' parameter")
-	}
-	return s.PrepareStagedLayer(options, differ)
 }
 
 func (s *store) DifferTarget(id string) (string, error) {
@@ -3700,7 +3693,7 @@ func (s *store) Shutdown(force bool) ([]string, error) {
 		err = fmt.Errorf("a layer is mounted: %w", ErrLayerUsedByContainer)
 	}
 	if err == nil {
-		// We don’t retain the lastWrite value, and treat this update as if someone else did the .Cleanup(),
+		// We don't retain the lastWrite value, and treat this update as if someone else did the .Cleanup(),
 		// so that we reload after a .Shutdown() the same way other processes would.
 		// Shutdown() is basically an error path, so reliability is more important than performance.
 		if _, err2 := s.graphLock.RecordWrite(); err2 != nil {
@@ -3751,7 +3744,7 @@ func copySlicePreferringNil[S ~[]E, E any](s S) S {
 // copyMapPreferringNil returns a shallow clone of map m.
 // If m is empty, a nil is returned.
 //
-// (As of, e.g., Go 1.23, maps.Clone preserves nil, but that’s not a documented promise;
+// (As of, e.g., Go 1.23, maps.Clone preserves nil, but that's not a documented promise;
 // and this function turns even non-nil empty maps into nil.)
 func copyMapPreferringNil[K comparable, V any](m map[K]V) map[K]V {
 	if len(m) == 0 {
@@ -3965,4 +3958,14 @@ func (s *store) Dedup(req DedupArgs) (drivers.DedupResult, error) {
 		}
 		return rlstore.dedup(r)
 	})
+}
+
+// GetDigestType returns the configured digest type for the store
+func (s *store) GetDigestType() string {
+	s.graphLock.Lock()
+	defer s.graphLock.Unlock()
+	if s.digestType == "" {
+		return "sha256"
+	}
+	return s.digestType
 }
