@@ -33,6 +33,7 @@ func getCniInterface(conf *config.Config) (types.ContainerNetwork, error) {
 			return nil, err
 		}
 	}
+
 	return cni.NewCNINetworkInterface(&cni.InitConfig{
 		Config:       conf,
 		CNIConfigDir: confDir,

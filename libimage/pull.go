@@ -28,6 +28,70 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// isDigestReference checks if the given name is a digest reference (e.g., "sha256:..." or "sha512:...")
+func isDigestReference(name string) bool {
+	// Check if it has the format of a digest reference: algorithm:hexstring
+	if !strings.Contains(name, ":") {
+		return false
+	}
+
+	parts := strings.SplitN(name, ":", 2)
+	if len(parts) != 2 {
+		return false
+	}
+
+	algorithm := parts[0]
+	hashPart := parts[1]
+
+	// Check if the algorithm is a known digest algorithm
+	switch algorithm {
+	case "sha256", "sha512", "sha1", "md5":
+		// Valid algorithm, now check if hash part looks reasonable
+		if len(hashPart) == 0 {
+			return false
+		}
+		// Check if it's all hex characters
+		for _, c := range hashPart {
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// getDigestAlgorithmPrefix extracts the digest algorithm prefix from a digest reference
+// Returns the algorithm prefix (e.g., "sha256:", "sha512:") or empty string if not a digest reference
+func getDigestAlgorithmPrefix(name string) string {
+	if !isDigestReference(name) {
+		return ""
+	}
+
+	parts := strings.SplitN(name, ":", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+
+	return parts[0] + ":"
+}
+
+// trimDigestPrefix removes any digest algorithm prefix from the name
+// If the name is not a digest reference, returns the original name
+func trimDigestPrefix(name string) string {
+	if !isDigestReference(name) {
+		return name
+	}
+
+	parts := strings.SplitN(name, ":", 2)
+	if len(parts) != 2 {
+		return name
+	}
+
+	return parts[1]
+}
+
 // PullOptions allows for customizing image pulls.
 type PullOptions struct {
 	CopyOptions
@@ -101,7 +165,7 @@ func (r *Runtime) Pull(ctx context.Context, name string, pullPolicy config.PullP
 
 		// If the image clearly refers to a local one, we can look it up directly.
 		// In fact, we need to since they are not parseable.
-		if strings.HasPrefix(name, "sha256:") || (len(name) == 64 && !strings.ContainsAny(name, "/.:@")) {
+		if isDigestReference(name) || (len(name) == 64 && !strings.ContainsAny(name, "/.:@")) {
 			if pullPolicy == config.PullPolicyAlways {
 				return nil, fmt.Errorf("pull policy is always but image has been referred to by ID (%s)", name)
 			}
@@ -261,7 +325,10 @@ func (r *Runtime) copyFromDefault(ctx context.Context, ref types.ImageReference,
 			if err != nil {
 				return nil, nil, err
 			}
-			imageName = "sha256:" + storageName[1:]
+			imageName, err = getImageDigestString(ctx, ref, nil)
+			if err != nil {
+				return nil, nil, err
+			}
 		} else { // If the OCI-reference includes an image reference, use it
 			storageName = split[1]
 			imageName = storageName
@@ -280,7 +347,10 @@ func (r *Runtime) copyFromDefault(ctx context.Context, ref types.ImageReference,
 			if err != nil {
 				return nil, nil, err
 			}
-			imageName = "sha256:" + storageName[1:]
+			imageName, err = getImageDigestString(ctx, ref, nil)
+			if err != nil {
+				return nil, nil, err
+			}
 		default:
 			named, err := NormalizeName(storageName)
 			if err != nil {
@@ -306,7 +376,10 @@ func (r *Runtime) copyFromDefault(ctx context.Context, ref types.ImageReference,
 		if err != nil {
 			return nil, nil, err
 		}
-		imageName = "sha256:" + storageName[1:]
+		imageName, err = getImageDigestString(ctx, ref, nil)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	// Create a storage reference.
@@ -340,8 +413,12 @@ func (r *Runtime) storageReferencesReferencesFromArchiveReader(ctx context.Conte
 		}
 		destNames = append(destNames, destName)
 		// Make sure the image can be loaded after the pull by
-		// replacing the @ with sha256:.
-		imageNames = append(imageNames, "sha256:"+destName[1:])
+		// using the proper digest string with correct algorithm.
+		digestString, err := getImageDigestString(ctx, readerRef, &r.systemContext)
+		if err != nil {
+			return nil, nil, err
+		}
+		imageNames = append(imageNames, digestString)
 	} else {
 		for i := range destNames {
 			ref, err := NormalizeName(destNames[i])

@@ -4,14 +4,13 @@ package cni
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/containernetworking/cni/libcni"
@@ -22,10 +21,52 @@ import (
 	"github.com/containers/storage/pkg/fileutils"
 	"github.com/containers/storage/pkg/lockfile"
 	"github.com/containers/storage/pkg/unshare"
+	storagetypes "github.com/containers/storage/types"
+	"github.com/opencontainers/go-digest"
 	"github.com/sirupsen/logrus"
 )
 
 const defaultRootLockPath = "/run/lock/podman-cni.lock"
+
+var (
+	// cachedDigestAlgorithm holds the cached digest algorithm from storage configuration
+	cachedDigestAlgorithm digest.Algorithm
+	// digestAlgorithmOnce ensures the storage configuration is read only once
+	digestAlgorithmOnce sync.Once
+)
+
+// getDigestAlgorithmFromStorage reads the digest algorithm from storage configuration
+// and returns the appropriate digest.Algorithm. Defaults to SHA256 if not configured.
+// Uses sync.Once to ensure the configuration is read only once per process.
+func getDigestAlgorithmFromStorage() digest.Algorithm {
+	digestAlgorithmOnce.Do(func() {
+		// Read storage configuration using the storage library's method
+		storeOptions := &storagetypes.StoreOptions{}
+		
+		// Try to reload configuration from default locations
+		// This will read from storage.conf and set DigestType if present
+		if err := storagetypes.ReloadConfigurationFile("", storeOptions); err != nil {
+			// If we can't read the configuration, default to SHA256
+			logrus.Debugf("Failed to read storage configuration for digest algorithm: %v", err)
+			cachedDigestAlgorithm = digest.SHA256
+			return
+		}
+		
+		// Convert string to digest.Algorithm
+		switch storeOptions.DigestType {
+		case "sha512":
+			cachedDigestAlgorithm = digest.SHA512
+		case "sha256", "":
+			fallthrough
+		default:
+			cachedDigestAlgorithm = digest.SHA256
+		}
+		
+		logrus.Debugf("Using digest algorithm for CNI network IDs: %s", cachedDigestAlgorithm)
+	})
+	
+	return cachedDigestAlgorithm
+}
 
 type cniNetwork struct {
 	// cniConfigDir is directory where the cni config files are stored.
@@ -212,7 +253,7 @@ func (n *cniNetwork) loadNetworks() error {
 			continue
 		}
 
-		net, err := createNetworkFromCNIConfigList(conf, file)
+		net, err := createNetworkFromCNIConfigList(conf, file, getDigestAlgorithmFromStorage())
 		if err != nil {
 			// ignore ENOENT as the config has been removed in the meantime so we can just ignore this case
 			if !errors.Is(err, fs.ErrNotExist) {
@@ -286,11 +327,14 @@ func (n *cniNetwork) getNetwork(nameOrID string) (*network, error) {
 	return nil, fmt.Errorf("unable to find network with name or ID %s: %w", nameOrID, types.ErrNoSuchNetwork)
 }
 
-// getNetworkIDFromName creates a network ID from the name. It is just the
-// sha256 hash so it is not safe but it should be safe enough for our use case.
-func getNetworkIDFromName(name string) string {
-	hash := sha256.Sum256([]byte(name))
-	return hex.EncodeToString(hash[:])
+// getNetworkIDFromName creates a network ID from the name using the specified digest algorithm.
+func getNetworkIDFromName(name string, algorithm digest.Algorithm) string {
+	// Use the digest library's built-in functionality
+	digester := algorithm.Digester()
+	digester.Hash().Write([]byte(name))
+	digest := digester.Digest()
+	// Return just the hex part without the algorithm prefix
+	return digest.Encoded()
 }
 
 // Implement the NetUtil interface for easy code sharing with other network interfaces.

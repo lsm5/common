@@ -105,7 +105,7 @@ func (n *cniNetwork) networkCreate(newNetwork *types.Network, defaultNet bool) (
 	}
 
 	// generate the network ID
-	newNetwork.ID = getNetworkIDFromName(newNetwork.Name)
+	newNetwork.ID = getNetworkIDFromName(newNetwork.Name, getDigestAlgorithmFromStorage())
 
 	// when we do not have ipam we must disable dns
 	internalutil.IpamNoneDisableDNS(newNetwork)
