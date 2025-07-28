@@ -74,9 +74,15 @@ func (m *manifestOCI1) ConfigBlob(ctx context.Context) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		computedDigest := digest.FromBytes(blob)
-		if computedDigest != m.m.Config.Digest {
-			return nil, fmt.Errorf("Download config.json digest %s does not match expected %s", computedDigest, m.m.Config.Digest)
+		// Use the same algorithm as the expected digest for validation
+		expectedDigest := m.m.Config.Digest
+		if expectedDigest == digest.Digest("") {
+			return nil, fmt.Errorf("empty digest in manifest config")
+		}
+		algorithm := expectedDigest.Algorithm()
+		computedDigest := algorithm.FromBytes(blob)
+		if computedDigest != expectedDigest {
+			return nil, fmt.Errorf("Download config.json digest %s does not match expected %s", computedDigest, expectedDigest)
 		}
 		m.configBlob = blob
 	}

@@ -409,6 +409,17 @@ func (s storageTransport) ValidatePolicyConfigurationScope(scope string) error {
 
 // validateImageID returns nil if id is a valid (full) image ID, or an error
 func validateImageID(id string) error {
-	_, err := digest.Parse("sha256:" + id)
-	return err
+	// Try SHA256 first (most common case)
+	if _, err := digest.Parse("sha256:" + id); err == nil {
+		return nil
+	}
+	// Try SHA512 for digest agility
+	if _, err := digest.Parse("sha512:" + id); err == nil {
+		return nil
+	}
+	// Try other algorithms if needed
+	if _, err := digest.Parse("sha384:" + id); err == nil {
+		return nil
+	}
+	return fmt.Errorf("invalid image ID format: must be a valid SHA256, SHA384, or SHA512 digest")
 }

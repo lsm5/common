@@ -48,7 +48,7 @@ func typeToTarType(t string) (byte, error) {
 
 // readEstargzChunkedManifest reads the estargz manifest from the seekable stream blobStream.
 // It may return an error matching ErrFallbackToOrdinaryLayerDownload / errFallbackCanConvert.
-func readEstargzChunkedManifest(blobStream ImageSourceSeekable, blobSize int64, tocDigest digest.Digest) ([]byte, int64, error) {
+func readEstargzChunkedManifest(blobStream ImageSourceSeekable, blobSize int64, tocDigest digest.Digest, digestAlgorithm digest.Algorithm) ([]byte, int64, error) {
 	// information on the format here https://github.com/containerd/stargz-snapshotter/blob/main/docs/stargz-estargz.md
 	footerSize := int64(51)
 	if blobSize <= footerSize {
@@ -188,7 +188,7 @@ func openTmpFileNoTmpFile(tmpDir string) (*os.File, error) {
 // The compressed parameter indicates whether the manifest and tar-split data are zstd-compressed
 // (true) or stored uncompressed (false).  Uncompressed data is used only for an optimization to convert
 // a regular OCI layer to zstd:chunked when convert_images is set, and it is not used for distributed images.
-func readZstdChunkedManifest(tmpDir string, blobStream ImageSourceSeekable, tocDigest digest.Digest, annotations map[string]string, compressed bool) (_ []byte, _ *minimal.TOC, _ *os.File, _ int64, retErr error) {
+func readZstdChunkedManifest(tmpDir string, blobStream ImageSourceSeekable, tocDigest digest.Digest, annotations map[string]string, compressed bool, digestAlgorithm digest.Algorithm) (_ []byte, _ *minimal.TOC, _ *os.File, _ int64, retErr error) {
 	offsetMetadata := annotations[minimal.ManifestInfoKey]
 	if offsetMetadata == "" {
 		return nil, nil, nil, 0, fmt.Errorf("%q annotation missing", minimal.ManifestInfoKey)
@@ -268,7 +268,7 @@ func readZstdChunkedManifest(tmpDir string, blobStream ImageSourceSeekable, tocD
 	if err != nil {
 		return nil, nil, nil, 0, fmt.Errorf("validating and decompressing TOC: %w", err)
 	}
-	toc, err := unmarshalToc(decodedBlob)
+	toc, err := unmarshalTocWithDigestAlgorithm(decodedBlob, digestAlgorithm)
 	if err != nil {
 		return nil, nil, nil, 0, fmt.Errorf("unmarshaling TOC: %w", err)
 	}

@@ -246,7 +246,7 @@ func (c *layersCache) createCacheFileFromTOC(layerID string) (*layer, error) {
 		return nil, fmt.Errorf("read manifest file: %w", err)
 	}
 
-	cacheFile, err := writeCache(manifest, lcd.Format, layerID, c.store)
+	cacheFile, err := writeCache(manifest, lcd.Format, layerID, c.store, c.store.GetDigestAlgorithm())
 	if err != nil {
 		return nil, err
 	}
@@ -321,8 +321,8 @@ func (c *layersCache) load() error {
 // calculateHardLinkFingerprint calculates a hash that can be used to verify if a file
 // is usable for deduplication with hardlinks.
 // To calculate the digest, it uses the file payload digest, UID, GID, mode and xattrs.
-func calculateHardLinkFingerprint(f *fileMetadata) (string, error) {
-	digester := digest.Canonical.Digester()
+func calculateHardLinkFingerprint(f *fileMetadata, digestAlgorithm digest.Algorithm) (string, error) {
+	digester := digestAlgorithm.Digester()
 
 	modeString := fmt.Sprintf("%d:%d:%o", f.UID, f.GID, f.Mode)
 	hash := digester.Hash()
@@ -479,7 +479,7 @@ func writeCacheFileToWriter(writer io.Writer, bloomFilter *bloomFilter, tags [][
 // - digest(file.payload))
 // - digest(digest(file.payload) + file.UID + file.GID + file.mode + file.xattrs)
 // - digest(i) for each i in chunks(file payload)
-func writeCache(manifest []byte, format graphdriver.DifferOutputFormat, id string, dest setBigData) (*cacheFile, error) {
+func writeCache(manifest []byte, format graphdriver.DifferOutputFormat, id string, dest setBigData, digestAlgorithm digest.Algorithm) (*cacheFile, error) {
 	var vdata, tagsBuffer, fnames bytes.Buffer
 	tagLen := 0
 	digestLen := 0
@@ -509,7 +509,7 @@ func writeCache(manifest []byte, format graphdriver.DifferOutputFormat, id strin
 	var tags [][]byte
 	for _, k := range toc {
 		if k.Digest != "" {
-			digest, err := makeBinaryDigest(k.Digest)
+			digestBytes, err := makeBinaryDigest(k.Digest)
 			if err != nil {
 				return nil, err
 			}
@@ -517,11 +517,11 @@ func writeCache(manifest []byte, format graphdriver.DifferOutputFormat, id strin
 			if err != nil {
 				return nil, err
 			}
-			location := generateFileLocation(fileNamePos, 0, uint64(k.Size))
+			location := generateFileLocation(fileNamePos, uint64(k.Offset), uint64(k.Size))
 			off := uint64(vdata.Len())
 			l := uint64(len(location))
 
-			tag, err := appendTag(digest, off, l)
+			tag, err := appendTag(digestBytes, off, l)
 			if err != nil {
 				return nil, err
 			}
@@ -533,7 +533,7 @@ func writeCache(manifest []byte, format graphdriver.DifferOutputFormat, id strin
 			}
 			tags = append(tags, tag)
 
-			fp, err := calculateHardLinkFingerprint(k)
+			fp, err := calculateHardLinkFingerprint(k, digestAlgorithm)
 			if err != nil {
 				return nil, err
 			}
@@ -564,11 +564,11 @@ func writeCache(manifest []byte, format graphdriver.DifferOutputFormat, id strin
 			off := uint64(vdata.Len())
 			l := uint64(len(location))
 
-			digest, err := makeBinaryDigest(k.ChunkDigest)
+			digestBytes, err := makeBinaryDigest(k.ChunkDigest)
 			if err != nil {
 				return nil, err
 			}
-			d, err := appendTag(digest, off, l)
+			d, err := appendTag(digestBytes, off, l)
 			if err != nil {
 				return nil, err
 			}
@@ -583,7 +583,7 @@ func writeCache(manifest []byte, format graphdriver.DifferOutputFormat, id strin
 			if _, err := vdata.Write(location); err != nil {
 				return nil, err
 			}
-			digestLen = len(digest)
+			digestLen = len(digestBytes)
 		}
 	}
 
@@ -833,15 +833,15 @@ func (c *layersCache) findDigestInternal(digest string) (string, string, int64, 
 // findFileInOtherLayers finds the specified file in other layers.
 // file is the file to look for.
 func (c *layersCache) findFileInOtherLayers(file *fileMetadata, useHardLinks bool) (string, string, error) {
-	digest := file.Digest
+	digestStr := file.Digest
 	if useHardLinks {
 		var err error
-		digest, err = calculateHardLinkFingerprint(file)
+		digestStr, err = calculateHardLinkFingerprint(file, c.store.GetDigestAlgorithm())
 		if err != nil {
 			return "", "", err
 		}
 	}
-	target, name, off, err := c.findDigestInternal(digest)
+	target, name, off, err := c.findDigestInternal(digestStr)
 	if off == 0 {
 		return target, name, err
 	}
@@ -852,8 +852,17 @@ func (c *layersCache) findChunkInOtherLayers(chunk *minimal.FileMetadata) (strin
 	return c.findDigestInternal(chunk.ChunkDigest)
 }
 
+func getEmptyDigest(algorithm digest.Algorithm) string {
+	return algorithm.FromBytes([]byte{}).String()
+}
+
 func unmarshalToc(manifest []byte) (*minimal.TOC, error) {
+	return unmarshalTocWithDigestAlgorithm(manifest, digest.Canonical)
+}
+
+func unmarshalTocWithDigestAlgorithm(manifest []byte, digestAlgorithm digest.Algorithm) (*minimal.TOC, error) {
 	var toc minimal.TOC
+	emptyDigest := getEmptyDigest(digestAlgorithm)
 
 	iter := jsoniter.ParseBytes(jsoniter.ConfigFastest, manifest)
 
@@ -927,7 +936,7 @@ func unmarshalToc(manifest []byte) (*minimal.TOC, error) {
 					}
 				}
 				if m.Type == TypeReg && m.Size == 0 && m.Digest == "" {
-					m.Digest = digestSha256Empty
+					m.Digest = emptyDigest
 				}
 				toc.Entries = append(toc.Entries, m)
 			}
